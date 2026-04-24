@@ -3,8 +3,8 @@
 # Usage: ./run-as-2.sh <target_user> <application_name>
 #
 # Launches a GUI application as a different user using machinectl shell.
-# This version focuses on ISOLATED AUDIO: the target user's own PipeWire/PulseAudio 
-# services must be running (via systemd user session/lingering) for audio to work.
+# This version uses SHARED AUDIO: the target user connects to the desktop owner's
+# PipeWire/PulseAudio socket via ACL access.
 # Display sharing and DConf persistence are retained.
 
 # --- 1. Input Validation and Setup ---
@@ -110,7 +110,16 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
     setfacl -m u:"$TARGET_USER":rw "$CALLER_RUNDIR/$WAYLAND_SOCKET_NAME" > /dev/null 2>&1
 fi
 
-# 3. DConf Runtime Directory ACL Fix (To allow cache file creation/writes)
+# 3. Shared Audio: grant access to the caller's PulseAudio socket
+CALLER_PULSE_DIR="$CALLER_RUNDIR/pulse"
+CALLER_PULSE_SOCKET="$CALLER_PULSE_DIR/native"
+if [ -S "$CALLER_PULSE_SOCKET" ]; then
+    setfacl -m u:"$TARGET_USER":rx "$CALLER_PULSE_DIR" > /dev/null 2>&1
+    setfacl -m u:"$TARGET_USER":rw "$CALLER_PULSE_SOCKET" > /dev/null 2>&1
+    ACL_CLEANUP_TARGETS+=("$CALLER_PULSE_DIR" "$CALLER_PULSE_SOCKET")
+fi
+
+# 4. DConf Runtime Directory ACL Fix (To allow cache file creation/writes)
 DCONF_RUNTIME_DIR="$CALLER_RUNDIR/dconf"
 
 echo
@@ -134,8 +143,7 @@ TARGET_DCONF_FILE="$TARGET_DCONF_DIR/user"
 # --- 6. Shell Wrapper and Execution ---
 
 TARGET_DBUS_ADDR="unix:path=$TARGET_RUNDIR/bus"
-# Explicitly define the PulseAudio server socket path for the isolated session
-TARGET_PULSE_SERVER="unix:$TARGET_RUNDIR/pulse/native"
+SHARED_PULSE_SERVER="unix:$CALLER_RUNDIR/pulse/native"
 
 
 echo
@@ -152,18 +160,13 @@ WRAPPED_CMD="mkdir -p $TARGET_DCONF_DIR; \
              export XDG_RUNTIME_DIR=$TARGET_RUNDIR; \
              export DBUS_SESSION_BUS_ADDRESS=$TARGET_DBUS_ADDR; \
              
-             # Explicit Isolated Audio Fix: Set the PulseAudio server path
-             export PULSE_SERVER=$TARGET_PULSE_SERVER; \
-             
+             # Shared Audio: connect to the desktop owner's PulseAudio socket
+             export PULSE_SERVER=$SHARED_PULSE_SERVER; \
+
              export DBUS_FATAL_WARNINGS=0; \
-             
+
              # DConf Persistence Fix
              export DCONF_DEFAULT_USER_FILE=$TARGET_DCONF_FILE; \
-             
-             # Audio Isolation Cleanup: Clear any other variables pointing to the caller's session
-             unset PULSE_COOKIE_FILE; \
-             unset PIPEWIRE_RUNTIME_DIR; \
-             unset PIPEWIRE_SOCKET; \
              
              $TARGET_APP"
 
