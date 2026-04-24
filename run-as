@@ -39,17 +39,22 @@ SESSION_STATE=$(loginctl show-user "$TARGET_USER" 2>/dev/null | awk -F= '/^State
 
 if [ "$SESSION_STATE" != "active" ]; then
     echo "User '$TARGET_USER' has no active session (state: ${SESSION_STATE:-none}). Enabling linger..."
-    if ! sudo loginctl enable-linger "$TARGET_USER"; then
+    if ! loginctl enable-linger "$TARGET_USER"; then
         echo "Error: Failed to enable linger for '$TARGET_USER'."
+        exit 1
+    fi
+    echo "Starting user@${TARGET_UID}.service..."
+    if ! pkexec systemctl start "user@${TARGET_UID}.service"; then
+        echo "Error: Failed to start user session for '$TARGET_USER'."
         exit 1
     fi
     echo "Waiting for '$TARGET_USER' session to become ready..."
     for i in $(seq 1 20); do
-        [ -S "$TARGET_RUNDIR/bus" ] && break
+        systemctl is-active --quiet "user@${TARGET_UID}.service" && break
         sleep 0.5
     done
-    if [ ! -S "$TARGET_RUNDIR/bus" ]; then
-        echo "Error: Timed out waiting for '$TARGET_USER' D-Bus socket."
+    if ! systemctl is-active --quiet "user@${TARGET_UID}.service"; then
+        echo "Error: Timed out waiting for '$TARGET_USER' user session to start."
         exit 1
     fi
     echo "Session ready."
