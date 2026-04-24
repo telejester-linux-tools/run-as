@@ -33,6 +33,28 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# --- 1.6. Ensure Target User Session is Active ---
+TARGET_RUNDIR="/run/user/$TARGET_UID"
+SESSION_STATE=$(loginctl show-user "$TARGET_USER" 2>/dev/null | awk -F= '/^State=/{print $2}')
+
+if [ "$SESSION_STATE" != "active" ]; then
+    echo "User '$TARGET_USER' has no active session (state: ${SESSION_STATE:-none}). Enabling linger..."
+    if ! sudo loginctl enable-linger "$TARGET_USER"; then
+        echo "Error: Failed to enable linger for '$TARGET_USER'."
+        exit 1
+    fi
+    echo "Waiting for '$TARGET_USER' session to become ready..."
+    for i in $(seq 1 20); do
+        [ -S "$TARGET_RUNDIR/bus" ] && break
+        sleep 0.5
+    done
+    if [ ! -S "$TARGET_RUNDIR/bus" ]; then
+        echo "Error: Timed out waiting for '$TARGET_USER' D-Bus socket."
+        exit 1
+    fi
+    echo "Session ready."
+fi
+
 # Arrays for environment variables and for cleanup
 ENV_VAR_ARGS=""
 XHOST_CLEANUP_REQUIRED=0
@@ -131,7 +153,6 @@ TARGET_DCONF_FILE="$TARGET_DCONF_DIR/user"
 
 # --- 6. Shell Wrapper and Execution ---
 
-TARGET_RUNDIR="/run/user/$TARGET_UID"
 TARGET_DBUS_ADDR="unix:path=$TARGET_RUNDIR/bus"
 # Explicitly define the PulseAudio server socket path for the isolated session
 TARGET_PULSE_SERVER="unix:$TARGET_RUNDIR/pulse/native"
