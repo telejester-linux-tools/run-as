@@ -1,0 +1,189 @@
+#!/bin/bash
+# run-as-2.sh
+# Usage: ./run-as-2.sh <target_user> <application_name>
+#
+# Launches a GUI application as a different user using machinectl shell.
+# This version focuses on ISOLATED AUDIO: the target user's own PipeWire/PulseAudio 
+# services must be running (via systemd user session/lingering) for audio to work.
+# Display sharing and DConf persistence are retained.
+
+# --- 1. Input Validation and Setup ---
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <target_user> <application_name>"
+    echo "Example: $0 alice ptyxis"
+    exit 1
+fi
+
+TARGET_USER="$1"
+TARGET_APP="$2"
+CALLER_RUNDIR="$XDG_RUNTIME_DIR"
+HOST_IDENTIFIER=".host" 
+TARGET_USER_HOME="/home/$TARGET_USER"
+
+if [ -z "$CALLER_RUNDIR" ]; then
+    echo "Error: XDG_RUNTIME_DIR is not set. This script must be run from a logged-in user session."
+    exit 1
+fi
+
+# --- 1.5. Retrieve Target User ID ---
+# This is necessary to correctly set the isolated user's XDG_RUNTIME_DIR
+TARGET_UID=$(id -u "$TARGET_USER" 2>/dev/null)
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to get UID for user '$TARGET_USER'. Check if the user exists."
+    exit 1
+fi
+
+# Arrays for environment variables and for cleanup
+ENV_VAR_ARGS=""
+XHOST_CLEANUP_REQUIRED=0
+ACL_CLEANUP_REQUIRED=0
+
+# --- 2. Cleanup Function and Trap ---
+
+# A list of files/directories granted ACL permissions.
+ACL_CLEANUP_TARGETS=("$CALLER_RUNDIR")
+
+CLEANUP() {
+    echo ""
+    echo "--- Cleaning up temporary permissions ---"
+
+    # 1. Xhost cleanup (X11 only)
+    if [ "$XHOST_CLEANUP_REQUIRED" -eq 1 ]; then
+        echo "Revoking xhost permission for $TARGET_USER."
+        xhost -si:localuser:"$TARGET_USER" > /dev/null 2>&1
+    fi
+    
+    # 2. ACL cleanup: Only DConf and Wayland are shared now.
+    if [ "$ACL_CLEANUP_REQUIRED" -eq 1 ]; then
+        echo "Revoking setfacl permissions."
+        for path in "${ACL_CLEANUP_TARGETS[@]}"; do
+             if [ -e "$path" ] || [ -d "$path" ]; then
+                if [ "$path" != "$CALLER_RUNDIR" ]; then
+                    setfacl -x u:"$TARGET_USER" "$path" > /dev/null 2>&1
+                fi
+             fi
+        done
+        setfacl -x u:"$TARGET_USER":rx "$CALLER_RUNDIR" > /dev/null 2>&1
+    fi
+
+    echo "Cleanup complete."
+}
+
+# NOTE: The automatic cleanup trap must be disabled for background execution (&) to work.
+# If the script exits immediately, it would revoke permissions before the application starts.
+# trap CLEANUP EXIT
+
+# --- 3. Display Server Configuration (xhost) ---
+
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    echo "Detected Wayland session. Preparing to share Wayland/XWayland."
+    
+    XHOST_CLEANUP_REQUIRED=1
+    xhost +si:localuser:"$TARGET_USER" > /dev/null 2>&1
+    ENV_VAR_ARGS+=" -E DISPLAY=$DISPLAY"
+    
+    WAYLAND_SOCKET_NAME=$(basename "$WAYLAND_DISPLAY")
+    ACL_CLEANUP_TARGETS+=("$CALLER_RUNDIR/$WAYLAND_SOCKET_NAME")
+    ACL_CLEANUP_REQUIRED=1 # Set ACL required flag
+    
+elif [ -n "$DISPLAY" ]; then
+    echo "Detected X11 session. Preparing to share X11 display using xhost."
+    XHOST_CLEANUP_REQUIRED=1
+    xhost +si:localuser:"$TARGET_USER" > /dev/null 2>&1
+    ENV_VAR_ARGS+=" -E DISPLAY=$DISPLAY"
+else
+    echo "Error: Neither WAYLAND_DISPLAY nor DISPLAY is set. Cannot run GUI application."
+    exit 1
+fi
+
+# --- 4. System Service Sharing Configuration (setfacl) ---
+
+ACL_CLEANUP_REQUIRED=1
+
+# 1. Grant traverse permission on the caller's runtime directory for X access
+setfacl -m u:"$TARGET_USER":rx "$CALLER_RUNDIR" > /dev/null 2>&1
+
+# 2. Wayland Socket Access (if applicable)
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    setfacl -m u:"$TARGET_USER":rw "$CALLER_RUNDIR/$WAYLAND_SOCKET_NAME" > /dev/null 2>&1
+fi
+
+# 3. DConf Runtime Directory ACL Fix (To allow cache file creation/writes)
+DCONF_RUNTIME_DIR="$CALLER_RUNDIR/dconf"
+
+echo
+echo "--- Ensuring DConf runtime directory exists and is writable by '$TARGET_USER' ---"
+
+# 3.1. Create the directory as the caller (Jason)
+mkdir -p "$DCONF_RUNTIME_DIR"
+
+# 3.2. Apply explicit and default ACLs for target user
+setfacl -m u:"$TARGET_USER":rwx "$DCONF_RUNTIME_DIR" > /dev/null 2>&1
+setfacl -d -m u:"$TARGET_USER":rwx "$DCONF_RUNTIME_DIR" > /dev/null 2>&1
+
+ACL_CLEANUP_TARGETS+=("$DCONF_RUNTIME_DIR")
+
+
+# --- 5. DConf Setup (Persistence) ---
+
+TARGET_DCONF_DIR="/home/$TARGET_USER/.config/dconf"
+TARGET_DCONF_FILE="$TARGET_DCONF_DIR/user"
+
+echo
+echo "--- Ensuring DConf persistence directory exists for '$TARGET_USER' ---"
+
+# Ensure the target user's persistent DConf directory exists
+/usr/bin/machinectl shell \
+    --uid="$TARGET_USER" \
+    "$HOST_IDENTIFIER" \
+    /bin/sh \
+    -c "mkdir -p $TARGET_DCONF_DIR" > /dev/null 2>&1
+
+
+# --- 6. Shell Wrapper and Execution ---
+
+TARGET_RUNDIR="/run/user/$TARGET_UID"
+TARGET_DBUS_ADDR="unix:path=$TARGET_RUNDIR/bus"
+# Explicitly define the PulseAudio server socket path for the isolated session
+TARGET_PULSE_SERVER="unix:$TARGET_RUNDIR/pulse/native"
+
+
+echo
+echo "--- Starting '$TARGET_APP' as user '$TARGET_USER' via machinectl (NON-BLOCKING) ---"
+echo "Note: The environment is configured to connect to the isolated systemd/D-Bus session (UID $TARGET_UID)."
+echo
+
+# Isolated D-Bus/Audio Fix: Set the environment to point to the target user's own session.
+WRAPPED_CMD="export GTK_A11Y=none; \
+             
+             # Isolated Session Fix: Point to the target user's runtime directory and D-Bus socket
+             export XDG_RUNTIME_DIR=$TARGET_RUNDIR; \
+             export DBUS_SESSION_BUS_ADDRESS=$TARGET_DBUS_ADDR; \
+             
+             # Explicit Isolated Audio Fix: Set the PulseAudio server path
+             export PULSE_SERVER=$TARGET_PULSE_SERVER; \
+             
+             export DBUS_FATAL_WARNINGS=0; \
+             
+             # DConf Persistence Fix
+             export DCONF_DEFAULT_USER_FILE=$TARGET_DCONF_FILE; \
+             
+             # Audio Isolation Cleanup: Clear any other variables pointing to the caller's session
+             unset PULSE_COOKIE_FILE; \
+             unset PIPEWIRE_RUNTIME_DIR; \
+             unset PIPEWIRE_SOCKET; \
+             
+             $TARGET_APP"
+
+echo "Executing the final command:"
+echo "/usr/bin/machinectl shell --uid=... [ENV VARS] $HOST_IDENTIFIER /bin/sh -c \"...\" &" 
+echo
+
+# Execute the command with the shell wrapper
+/usr/bin/machinectl shell \
+    --uid="$TARGET_USER" \
+    $ENV_VAR_ARGS \
+    "$HOST_IDENTIFIER" \
+    /bin/sh \
+    -c \
+    "$WRAPPED_CMD" & # <--- Added '&' to background the launch
