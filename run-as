@@ -129,17 +129,6 @@ ACL_CLEANUP_TARGETS+=("$DCONF_RUNTIME_DIR")
 TARGET_DCONF_DIR="/home/$TARGET_USER/.config/dconf"
 TARGET_DCONF_FILE="$TARGET_DCONF_DIR/user"
 
-echo
-echo "--- Ensuring DConf persistence directory exists for '$TARGET_USER' ---"
-
-# Ensure the target user's persistent DConf directory exists
-/usr/bin/machinectl shell \
-    --uid="$TARGET_USER" \
-    "$HOST_IDENTIFIER" \
-    /bin/sh \
-    -c "mkdir -p $TARGET_DCONF_DIR" > /dev/null 2>&1
-
-
 # --- 6. Shell Wrapper and Execution ---
 
 TARGET_RUNDIR="/run/user/$TARGET_UID"
@@ -154,7 +143,8 @@ echo "Note: The environment is configured to connect to the isolated systemd/D-B
 echo
 
 # Isolated D-Bus/Audio Fix: Set the environment to point to the target user's own session.
-WRAPPED_CMD="export GTK_A11Y=none; \
+WRAPPED_CMD="mkdir -p $TARGET_DCONF_DIR; \
+             export GTK_A11Y=none; \
              
              # Isolated Session Fix: Point to the target user's runtime directory and D-Bus socket
              export XDG_RUNTIME_DIR=$TARGET_RUNDIR; \
