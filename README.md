@@ -67,6 +67,25 @@ It will **not** work on non-systemd distributions such as Alpine Linux, Void Lin
 
 `machinectl` is included in `systemd-container`, which is installed by default on Fedora Workstation.
 
+## Bash completion
+
+The file `run-as.bash-completion` provides tab completion: the first argument completes usernames and the second completes executable names from `$PATH`.
+
+**Install for your user only:**
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+cp run-as.bash-completion ~/.local/share/bash-completion/completions/run-as
+```
+
+**Install system-wide:**
+
+```bash
+sudo cp run-as.bash-completion /etc/bash_completion.d/run-as
+```
+
+Either location is picked up automatically by bash-completion without needing to source anything manually. Open a new shell after installing.
+
 ## Limitations
 
 - ACL permissions granted to the target user are not automatically revoked when the application exits, as the cleanup function cannot run after backgrounding the launch. The permissions are scoped to runtime sockets and directories under `/run/user` which are cleaned up on logout or reboot.

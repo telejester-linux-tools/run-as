@@ -1,0 +1,15 @@
+_run_as_completion() {
+    local cur prev cword
+    _init_completion || return
+
+    case $cword in
+        1)
+            COMPREPLY=($(compgen -u -- "$cur"))
+            ;;
+        2)
+            COMPREPLY=($(compgen -c -- "$cur"))
+            ;;
+    esac
+}
+
+complete -F _run_as_completion run-as
